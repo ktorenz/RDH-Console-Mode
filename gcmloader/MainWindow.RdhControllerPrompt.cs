@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -211,8 +211,24 @@ namespace gcmloader
             {
                 if (_rdhBtWatcher != null) return;
 
-                string selector = Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(false);
-                _rdhBtWatcher = DeviceInformation.CreateWatcher(selector);
+                // Pairing lives on ASSOCIATION ENDPOINTS, not device interfaces.
+                // Using BluetoothDevice.GetDeviceSelectorFromPairingState here
+                // returns entries whose Pairing.CanPair is always false, so the
+                // CanPair check below rejected everything and nothing ever
+                // paired. Verified live: with AssociationEndpoint enumeration,
+                // pairable devices correctly report CanPair=True.
+                // ProtocolId {e0cbf06c-...} = Bluetooth classic, {bb7bb05e-...} = LE.
+                const string aqs =
+                    "System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" OR " +
+                    "System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\"";
+                string[] aepProps =
+                {
+                    "System.Devices.Aep.DeviceAddress",
+                    "System.Devices.Aep.IsPaired",
+                    "System.Devices.Aep.IsConnected"
+                };
+                _rdhBtWatcher = DeviceInformation.CreateWatcher(
+                    aqs, aepProps, DeviceInformationKind.AssociationEndpoint);
 
                 _rdhBtWatcher.Added += async (w, di) =>
                 {
@@ -225,7 +241,11 @@ namespace gcmloader
                             name.IndexOf("controller", StringComparison.OrdinalIgnoreCase) >= 0 ||
                             name.IndexOf("gamepad", StringComparison.OrdinalIgnoreCase) >= 0;
                         if (!looksGamepad) return;
-                        if (di.Pairing == null || di.Pairing.IsPaired || !di.Pairing.CanPair) return;
+                        if (di.Pairing == null || di.Pairing.IsPaired || !di.Pairing.CanPair)
+                        {
+                            App.StartupTrace($"RDH pairing: skipping '{name}' (paired={di.Pairing?.IsPaired}, canPair={di.Pairing?.CanPair}).");
+                            return;
+                        }
 
                         App.StartupTrace($"RDH pairing: attempting '{name}'...");
                         var custom = di.Pairing.Custom;
