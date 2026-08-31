@@ -117,7 +117,20 @@ namespace gcmloader
                     if (p != null && p.MainWindowHandle != IntPtr.Zero) break;
                     await Task.Delay(400);
                 }
-                await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                // If NOTHING is paired this is a first-boot console and the
+                // customer needs the instruction immediately - only settle long
+                // enough for Playnite to paint. The configured delay applies
+                // solely to the already-paired case, where the prompt is a
+                // fallback rather than the main event.
+                if (await RdhAnyGamepadPairedAsync())
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+                }
+                else
+                {
+                    App.StartupTrace("RDH controller prompt: nothing paired - prompting immediately.");
+                    await Task.Delay(1200);
+                }
 
                 bool overlayShown = false;
                 while (!_rdhPromptDismissed)
@@ -145,6 +158,12 @@ namespace gcmloader
                         DispatcherQueue.TryEnqueue(RdhShowPairOverlay);
                         RdhStartBtAutoPair();
                         overlayShown = true;
+
+                        // Showing a top-most window from this process can pull
+                        // GCM's main window forward with it. Playnite must stay
+                        // the visible app - the overlay sits over IT, not over
+                        // the GCM shell UI.
+                        await RdhKeepPlayniteInFrontAsync();
                     }
 
                     await Task.Delay(2000);
@@ -153,6 +172,32 @@ namespace gcmloader
             catch (Exception ex)
             {
                 App.StartupTrace($"RDH controller prompt loop failed: {ex.Message}");
+            }
+        }
+
+        // Re-assert Playnite as the foreground window. Called after the overlay
+        // appears, and again a moment later, because the z-order change settles
+        // asynchronously.
+        private async Task RdhKeepPlayniteInFrontAsync()
+        {
+            try
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    await Task.Delay(400);
+                    var pn = Process.GetProcessesByName("Playnite.FullscreenApp").FirstOrDefault();
+                    if (pn != null && pn.MainWindowHandle != IntPtr.Zero)
+                    {
+                        MakeSelfNonTopmost();
+                        await ForcefullyBringToForeground(pn.MainWindowHandle);
+                    }
+                }
+                // overlay must remain visible above Playnite
+                DispatcherQueue.TryEnqueue(() => _rdhPairAppWindow?.Show(false));
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH keep-playnite-front failed: {ex.Message}");
             }
         }
 
