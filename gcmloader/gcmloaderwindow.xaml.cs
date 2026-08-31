@@ -9333,6 +9333,7 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     await StartPlaynite();
                     App.StartupTrace("Configured launcher start finished.");
                     _ = DeferredUiRevealAsync();
+                    _ = RdhControllerPromptLoopAsync();
                 }
                 else
                 {
