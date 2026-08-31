@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
@@ -44,6 +44,59 @@ namespace gcmloader
             new SharpDX.XInput.Controller(SharpDX.XInput.UserIndex.Three),
             new SharpDX.XInput.Controller(SharpDX.XInput.UserIndex.Four)
         };
+
+        // Duration of the active Playnite theme's startup video, so the prompt
+        // can land on the LOGIN SCREEN rather than on top of the intro
+        // animation. Resolves the theme id from fullscreenConfig.json and reads
+        // "Startup Video\Startup.mp4" - the file Aniki's theme options write the
+        // chosen intro to. Returns zero when anything is missing; the override
+        // key controller_prompt_video_wait (seconds) wins when set (0 disables
+        // the wait entirely).
+        private async Task<TimeSpan> RdhGetStartupVideoWaitAsync()
+        {
+            try
+            {
+                try
+                {
+                    int overrideSec = AppSettings.Load<int>("controller_prompt_video_wait");
+                    if (overrideSec >= 0) return TimeSpan.FromSeconds(overrideSec);
+                }
+                catch { }
+
+                string exe = AutoDetectLauncherPath("playnite");
+                if (string.IsNullOrWhiteSpace(exe)) return TimeSpan.Zero;
+                string root = Path.GetDirectoryName(exe);
+
+                // portable installs keep config beside the exe; installed mode
+                // keeps it under %AppData%\Playnite
+                string appDataPn = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Playnite");
+                string cfg = File.Exists(Path.Combine(root, "fullscreenConfig.json"))
+                    ? Path.Combine(root, "fullscreenConfig.json")
+                    : Path.Combine(appDataPn, "fullscreenConfig.json");
+                if (!File.Exists(cfg)) return TimeSpan.Zero;
+
+                string themeId = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(cfg))["Theme"]?.ToString();
+                if (string.IsNullOrWhiteSpace(themeId)) return TimeSpan.Zero;
+
+                string video = null;
+                foreach (string baseDir in new[] { root, appDataPn })
+                {
+                    string candidate = Path.Combine(baseDir, "Themes", "Fullscreen", themeId, "Startup Video", "Startup.mp4");
+                    if (File.Exists(candidate)) { video = candidate; break; }
+                }
+                if (video == null) return TimeSpan.Zero;
+
+                var sf = await Windows.Storage.StorageFile.GetFileFromPathAsync(video);
+                var props = await sf.Properties.GetVideoPropertiesAsync();
+                return props.Duration;
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH startup-video duration check failed: {ex.Message}");
+                return TimeSpan.Zero;
+            }
+        }
 
         private bool RdhAnyControllerConnected()
         {
@@ -142,7 +195,15 @@ namespace gcmloader
                 }
                 else
                 {
-                    App.StartupTrace("RDH controller prompt: nothing paired - prompting as soon as Playnite is up.");
+                    // Let the theme's intro video finish so the prompt lands on
+                    // the login screen, not on top of the animation.
+                    TimeSpan videoWait = await RdhGetStartupVideoWaitAsync();
+                    if (videoWait > TimeSpan.Zero)
+                    {
+                        App.StartupTrace($"RDH controller prompt: waiting {videoWait.TotalSeconds:F1}s for the startup video to finish.");
+                        await Task.Delay(videoWait + TimeSpan.FromMilliseconds(1200));
+                    }
+                    App.StartupTrace("RDH controller prompt: nothing paired - prompting at the login screen.");
                 }
 
                 bool overlayShown = false;
