@@ -9839,6 +9839,36 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
                 Directory.CreateDirectory(updateDir);
                 string zipPath = Path.Combine(updateDir, "rdh-update.zip");
 
+                // LOOP BREAKER. A self-updating shell has one catastrophic
+                // failure mode: an update that applies, fails to take, and is
+                // retried on every launch forever - a console stuck restarting.
+                // Record attempts per target version and give up after 3, so a
+                // bad release degrades to "stays on the working version" rather
+                // than "restarts endlessly".
+                string attemptFile = Path.Combine(updateDir, "attempts.txt");
+                string targetTag = info.VersionText ?? "unknown";
+                int attempts = 0;
+                try
+                {
+                    if (File.Exists(attemptFile))
+                    {
+                        string[] parts = File.ReadAllText(attemptFile).Split('|');
+                        if (parts.Length == 2 && string.Equals(parts[0], targetTag, StringComparison.OrdinalIgnoreCase))
+                        {
+                            int.TryParse(parts[1], out attempts);
+                        }
+                    }
+                }
+                catch { }
+
+                if (attempts >= 3)
+                {
+                    App.StartupTrace($"RDH auto-update: {targetTag} already attempted {attempts}x without success - giving up to avoid a restart loop.");
+                    return;
+                }
+
+                try { File.WriteAllText(attemptFile, $"{targetTag}|{attempts + 1}"); } catch { }
+
                 ShowInAppNotification($"Downloading update {info.VersionText}...");
                 using (var client = new HttpClient())
                 {
