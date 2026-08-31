@@ -9468,42 +9468,95 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
             public string exe { get; set; }
             public string args { get; set; }
             public string image { get; set; }
+            // "launcher" places the card next to the Playnite launcher card;
+            // anything else (or omitted) places it in the apps column, where it
+            // replaces the live-process cards.
+            public string column { get; set; }
+        }
+
+        private readonly List<Border> _rdhFixedProgramCards = new();
+
+        private static List<RdhFixedCard> RdhLoadFixedCards()
+        {
+            try
+            {
+                string jsonPath = Path.Combine(RdhSettingsDir, "rdh_cards.json");
+                if (!File.Exists(jsonPath)) return new List<RdhFixedCard>();
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<List<RdhFixedCard>>(
+                    File.ReadAllText(jsonPath)) ?? new List<RdhFixedCard>();
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH fixed cards json failed: {ex.Message}");
+                return new List<RdhFixedCard>();
+            }
+        }
+
+        private Border RdhBuildFixedCard(RdhFixedCard c)
+        {
+            if (string.IsNullOrWhiteSpace(c?.exe) || !File.Exists(c.exe)) return null;
+            string exePath = c.exe;
+            string exeArgs = c.args;
+
+            var item = new LauncherCardItem
+            {
+                Name = string.IsNullOrWhiteSpace(c.name)
+                    ? Path.GetFileNameWithoutExtension(exePath) : c.name,
+                Subtitle = string.IsNullOrWhiteSpace(c.subtitle) ? "App" : c.subtitle,
+                Description = "Pinned app.",
+                ImagePath = RdhResolveCardImage(c.image),
+                ExePath = exePath,
+                TapAction = (s, e) => _ = RdhLaunchFixedAppAsync(exePath, exeArgs)
+            };
+            return CreateLauncherCard(item);
+        }
+
+        // Apps-column fixed cards. Idempotent: the responsive-shell rebuild and
+        // every process rescan clear or reshuffle ProgramCardPanel, so this
+        // removes its own previous cards and re-adds them.
+        private void RdhAddFixedProgramCards()
+        {
+            try
+            {
+                if (!RdhDirectPlayniteMode()) return;
+
+                foreach (var old in _rdhFixedProgramCards)
+                {
+                    ProgramCardPanel.Children.Remove(old);
+                }
+                _rdhFixedProgramCards.Clear();
+
+                foreach (var c in RdhLoadFixedCards())
+                {
+                    if (string.Equals(c?.column, "launcher", StringComparison.OrdinalIgnoreCase)) continue;
+                    var card = RdhBuildFixedCard(c);
+                    if (card == null) continue;
+                    ProgramCardPanel.Children.Add(card);
+                    _rdhFixedProgramCards.Add(card);
+                }
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH fixed program cards failed: {ex.Message}");
+            }
         }
 
         // Fixed launcher-bar cards from %APPDATA%\gcmsettings\rdh_cards.json,
         // replacing the tag's running-app ("recent") card in Playnite mode.
         // Missing file or bad entries are skipped silently - the bar just shows
         // fewer cards.
+        // Launcher-column fixed cards: only entries with "column": "launcher"
+        // (e.g. a Discord card beside the Playnite card). Everything else goes
+        // to the apps column via RdhAddFixedProgramCards.
         private void RdhAddFixedLauncherCards()
         {
             try
             {
-                string jsonPath = Path.Combine(RdhSettingsDir, "rdh_cards.json");
-                if (!File.Exists(jsonPath)) return;
-
-                var cards = Newtonsoft.Json.JsonConvert.DeserializeObject<List<RdhFixedCard>>(
-                    File.ReadAllText(jsonPath));
-                if (cards == null) return;
-
-                foreach (var c in cards)
+                foreach (var c in RdhLoadFixedCards())
                 {
-                    if (string.IsNullOrWhiteSpace(c?.exe) || !File.Exists(c.exe)) continue;
-                    string exePath = c.exe;
-                    string exeArgs = c.args;
-
-                    var item = new LauncherCardItem
-                    {
-                        Name = string.IsNullOrWhiteSpace(c.name)
-                            ? Path.GetFileNameWithoutExtension(exePath) : c.name,
-                        Subtitle = string.IsNullOrWhiteSpace(c.subtitle) ? "App" : c.subtitle,
-                        Description = "Pinned app.",
-                        // null ImagePath -> CreateLauncherCard extracts the exe's own icon
-                        ImagePath = RdhResolveCardImage(c.image),
-                        ExePath = exePath,
-                        TapAction = (s, e) => _ = RdhLaunchFixedAppAsync(exePath, exeArgs)
-                    };
-
-                    var card = CreateLauncherCard(item);
+                    if (!string.Equals(c?.column, "launcher", StringComparison.OrdinalIgnoreCase)) continue;
+                    var card = RdhBuildFixedCard(c);
+                    if (card == null) continue;
                     LauncherAreaPanel.Children.Add(card);
                     _launcherAreaButtons.Add(card);
                 }
@@ -9929,6 +9982,7 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
                     ProgramCardPanel.Children.Clear();
                     _cardCache.Clear();
+                    _rdhFixedProgramCards.Clear(); // RDH patch: panel was cleared wholesale
 
                     if (_latestProcessData != null && _latestProcessData.Count > 0)
                     {
@@ -9936,9 +9990,11 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     }
                     else
                     {
-                        NoCardsMessage.Visibility = Visibility.Visible;
+                        // RDH patch: never show the empty-state text in Playnite mode
+                        NoCardsMessage.Visibility = RdhDirectPlayniteMode() ? Visibility.Collapsed : Visibility.Visible;
                         ColumnSeparator.Visibility = Visibility.Visible;
                     }
+                    RdhAddFixedProgramCards(); // RDH patch: repopulate apps column
                 }
                 finally
                 {
@@ -12106,6 +12162,14 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
         {
             if (processDataList == null) return;
 
+            // RDH patch: in Playnite mode the apps column holds fixed cards, not
+            // live process cards - feed the scan an empty list so stale process
+            // cards are removed and none are added.
+            if (RdhDirectPlayniteMode())
+            {
+                processDataList = new List<ProcessData>();
+            }
+
             _latestProcessData = processDataList.ToList();
 
             if (!_isShellUiReady || MainContent == null || MainContent.Visibility != Visibility.Visible)
@@ -12215,7 +12279,7 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     _selectedCardIndex = 0;
                 }
 
-                NoCardsMessage.Visibility = _cardCache.Any() ? Visibility.Collapsed : Visibility.Visible;
+                NoCardsMessage.Visibility = (_cardCache.Any() || RdhDirectPlayniteMode()) ? Visibility.Collapsed : Visibility.Visible;
                 HighlightSelectedCard(skipScroll: true, forceAnimation: false);
             }
 
