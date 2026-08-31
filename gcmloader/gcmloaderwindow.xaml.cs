@@ -8073,6 +8073,24 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
             {
                 string targetExecutable = GcmWindowsShellService.ResolveStableExecutablePath(
                     Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty);
+
+                // RDH patch: NEVER register the shell to a path outside Program
+                // Files. The tag registers its own running location, so a test
+                // run from Downloads would point the machine-wide Winlogon shell
+                // at a folder that does not exist on a shipped unit (different
+                // account, no Downloads) - bricking every account to no shell.
+                // Only self-register from a real install.
+                string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                bool installed =
+                    (!string.IsNullOrEmpty(progFiles) && targetExecutable.StartsWith(progFiles, StringComparison.OrdinalIgnoreCase)) ||
+                    (!string.IsNullOrEmpty(progFilesX86) && targetExecutable.StartsWith(progFilesX86, StringComparison.OrdinalIgnoreCase));
+                if (!installed)
+                {
+                    App.StartupTrace($"RDH: shell registration SKIPPED - '{targetExecutable}' is not under Program Files (test/dev run).");
+                    return;
+                }
+
                 string targetShellValue = $"\"{targetExecutable}\"";
 
                 if (await TrySetWinlogonShellViaServiceAsync(targetShellValue))
@@ -9475,6 +9493,20 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
                 string targetExecutable = GcmWindowsShellService.ResolveStableExecutablePath(
                     Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty);
+
+                // RDH patch: in Playnite mode, restoring the background explorer
+                // shell can wait up to ~10s for the shell to report ready. That
+                // wait sits directly in the boot path before Playnite launches.
+                // Playnite does not need the desktop shell, so kick it off
+                // fire-and-forget and let Playnite launch immediately - explorer
+                // comes up in the background for the Win-key/desktop path.
+                if (RdhDirectPlayniteMode())
+                {
+                    _ = GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(targetExecutable, arguments: null);
+                    App.StartupTrace("RDH: background explorer shell restore started (non-blocking).");
+                    return;
+                }
+
                 bool shellReady = await GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(
                     targetExecutable,
                     arguments: null);
