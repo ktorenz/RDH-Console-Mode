@@ -296,41 +296,123 @@ namespace gcmloader
                 }
                 catch { }
 
+                // Fullscreen art mode engages when the customer-facing images
+                // exist in %APPDATA%\gcmsettings:
+                //   pairprompt_gamepad.png  - the controller drawing (required
+                //                             for fullscreen mode)
+                //   pairprompt_home.png     - HOME button icon   (optional)
+                //   pairprompt_minus.png    - minus button icon  (optional)
+                // Without the gamepad image the compact lower-third banner is
+                // used, so nothing breaks while art is in progress.
+                string gamepadArt = RdhResolveCardImage("pairprompt_gamepad.png");
+                string homeIcon = RdhResolveCardImage("pairprompt_home.png");
+                string minusIcon = RdhResolveCardImage("pairprompt_minus.png");
+                bool fullscreenArt = gamepadArt != null;
+
+                int scrW = GetScreenWidth();
+                int scrH = GetScreenHeight();
+
                 var title = new TextBlock
                 {
                     Text = text,
-                    FontSize = 34,
+                    FontSize = fullscreenArt ? 44 : 34,
                     FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
                     Foreground = new SolidColorBrush(Colors.White),
                     HorizontalAlignment = HorizontalAlignment.Center
                 };
-                var subtitle = new TextBlock
+
+                // Instruction row: Press [HOME] + [-] to pair, with icon images
+                // when supplied and text tokens otherwise.
+                var instruction = new StackPanel
                 {
-                    Text = subText,
-                    FontSize = 22,
-                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(210, 190, 205, 220)),
+                    Orientation = Orientation.Horizontal,
                     HorizontalAlignment = HorizontalAlignment.Center,
-                    Margin = new Thickness(0, 14, 0, 0)
+                    Spacing = 14,
+                    Margin = new Thickness(0, fullscreenArt ? 26 : 14, 0, 0)
                 };
+                var instrBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(225, 200, 214, 228));
+                double instrFont = fullscreenArt ? 30 : 22;
+                double iconSize = fullscreenArt ? 64 : 40;
+
+                void AddInstrText(string t)
+                {
+                    instruction.Children.Add(new TextBlock
+                    {
+                        Text = t,
+                        FontSize = instrFont,
+                        Foreground = instrBrush,
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                }
+                void AddInstrIcon(string file, string fallback)
+                {
+                    if (file != null)
+                    {
+                        instruction.Children.Add(new Image
+                        {
+                            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(file)),
+                            Height = iconSize,
+                            Stretch = Stretch.Uniform,
+                            VerticalAlignment = VerticalAlignment.Center
+                        });
+                    }
+                    else
+                    {
+                        AddInstrText(fallback);
+                    }
+                }
+                AddInstrText("Press");
+                AddInstrIcon(homeIcon, "HOME");
+                AddInstrText("+");
+                AddInstrIcon(minusIcon, "-");
+                AddInstrText("to pair");
+
                 var stack = new StackPanel
                 {
                     VerticalAlignment = VerticalAlignment.Center,
                     HorizontalAlignment = HorizontalAlignment.Center
                 };
-                stack.Children.Add(title);
-                stack.Children.Add(subtitle);
 
-                var panel = new Border
+                if (fullscreenArt)
                 {
-                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(232, 6, 10, 16)),
-                    BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(70, 255, 255, 255)),
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(18),
-                    Padding = new Thickness(56, 34, 56, 34),
-                    Child = stack
-                };
+                    stack.Children.Add(new Image
+                    {
+                        Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(gamepadArt)),
+                        MaxHeight = scrH * 0.52,
+                        MaxWidth = scrW * 0.62,
+                        Stretch = Stretch.Uniform,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        Margin = new Thickness(0, 0, 0, 38)
+                    });
+                }
+                stack.Children.Add(title);
+                stack.Children.Add(instruction);
+
+                FrameworkElement content;
+                if (fullscreenArt)
+                {
+                    // console-style setup screen: opaque near-black, no card chrome
+                    var fsGrid = new Grid
+                    {
+                        Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 4, 7, 12))
+                    };
+                    fsGrid.Children.Add(stack);
+                    content = fsGrid;
+                }
+                else
+                {
+                    content = new Border
+                    {
+                        Background = new SolidColorBrush(Windows.UI.Color.FromArgb(232, 6, 10, 16)),
+                        BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(70, 255, 255, 255)),
+                        BorderThickness = new Thickness(1),
+                        CornerRadius = new CornerRadius(18),
+                        Padding = new Thickness(56, 34, 56, 34),
+                        Child = stack
+                    };
+                }
                 var root = new Grid();
-                root.Children.Add(panel);
+                root.Children.Add(content);
                 // gun / mouse tap dismisses for this session
                 root.Tapped += (s, e) =>
                 {
@@ -370,12 +452,17 @@ namespace gcmloader
                     App.StartupTrace($"RDH overlay no-activate failed: {exStyle.Message}");
                 }
 
-                int sw = GetScreenWidth();
-                int sh = GetScreenHeight();
-                int w = Math.Min(1000, sw - 120);
-                int h = 200;
-                _rdhPairAppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
-                    (sw - w) / 2, sh - h - (int)(sh * 0.12), w, h));
+                if (fullscreenArt)
+                {
+                    _rdhPairAppWindow.MoveAndResize(new Windows.Graphics.RectInt32(0, 0, scrW, scrH));
+                }
+                else
+                {
+                    int w = Math.Min(1000, scrW - 120);
+                    int h = 200;
+                    _rdhPairAppWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+                        (scrW - w) / 2, scrH - h - (int)(scrH * 0.12), w, h));
+                }
 
                 // Show WITHOUT activating: focus stays with Playnite so the
                 // login screen still receives input the moment a pad connects.
