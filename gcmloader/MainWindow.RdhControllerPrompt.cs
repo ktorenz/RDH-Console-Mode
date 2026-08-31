@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
@@ -67,13 +68,16 @@ namespace gcmloader
 
             try
             {
-                const string pairedAqs =
-                    "(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" OR " +
-                    "System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\") AND " +
-                    "System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
-
+                // MEASURED: querying association endpoints by ProtocolId triggers
+                // a Bluetooth INQUIRY SCAN and takes ~30 SECONDS - that was the
+                // entire delay between Playnite appearing and this prompt. An
+                // inquiry is right for DISCOVERING a device to pair (the watcher
+                // still uses it), but asking "is one already bonded" only needs
+                // the local bond database. Measured on real hardware:
+                //   AEP ProtocolId query ....... 30153 ms
+                //   paired-state selector ......     8 ms
                 var found = await DeviceInformation.FindAllAsync(
-                    pairedAqs, null, DeviceInformationKind.AssociationEndpoint);
+                    Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(true));
 
                 bool any = found.Any(di =>
                 {
@@ -289,6 +293,21 @@ namespace gcmloader
                 presenter.IsMinimizable = false;
                 presenter.IsAlwaysOnTop = true;
                 _rdhPairAppWindow.SetPresenter(presenter);
+
+                // Never let this window take activation. It is an instruction
+                // banner, not something to interact with - and activating it
+                // pulls the whole GCM process forward, which is the remaining
+                // "brief flash of the GCM shell UI" the user reports.
+                try
+                {
+                    int ex = RdhFg.GetWindowLong(hwnd, RdhFg.GWL_EXSTYLE);
+                    RdhFg.SetWindowLong(hwnd, RdhFg.GWL_EXSTYLE,
+                        ex | RdhFg.WS_EX_NOACTIVATE | RdhFg.WS_EX_TOOLWINDOW);
+                }
+                catch (Exception exStyle)
+                {
+                    App.StartupTrace($"RDH overlay no-activate failed: {exStyle.Message}");
+                }
 
                 int sw = GetScreenWidth();
                 int sh = GetScreenHeight();
