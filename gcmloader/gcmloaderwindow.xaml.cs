@@ -9491,6 +9491,23 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
         // Diese Methode kümmert sich am Ende NUR noch um das reine Öffnen des Launchers.
         // --- RDH patch helpers ------------------------------------------------
+        // Public half of the RDH update-signing key. The private key lives only
+        // on the build machine (never in this repo). Every release zip must be
+        // accompanied by a .sig asset (RSA-PSS SHA-256, base64); an update whose
+        // signature does not verify is discarded. This makes the GitHub repo a
+        // dumb CDN - compromising it gains nothing without the signing key.
+        private const string RdhUpdatePublicKeyPem = @"-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAqHEjiwKyBmQUaJuZaxaQ
+NptsvOw+mMG0hiu0r44uyV2HbtZm/Can1PgtDk7ADjIJ1Hrlx374vjhLv/7AonFy
+kRZ/2v+sPgG2lE23uGjB+XNdcnh5sUlhYhHKywjLlSfKEqb5MgoL6N888uTzmkrs
+17KzRkAisidJtIEYWvRM+et3tbKFPw8iCp8rumcVtYxMgA5rFPaJMPpuFk5SPDls
+5FoAu6vu1d2AWqQvTqJOMraluDhZuApqfQMnT26AW/n0yjmgDvC5U5/3CUjHAcAx
+/tLx3GqaCIrFvvkY7jYaovfLaAcXYuOEQlNWWmbUqv5sHWmLZP01J9XA1oNrt7OQ
+v4GyqEA6lyxi9U0cIgCV9iUi5pzyQcLu15gAWiHammR63qjLxIWvTdIG6ju6lfWm
+Uu3E6IVFg6nQUsbSy90+CtbMZHvCxmXX9hGefiR6ND3AhHLJyHCUkOjLjAI35KaJ
+m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
+-----END PUBLIC KEY-----";
+
         private static class RdhFg
         {
             [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -9729,7 +9746,38 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     await httpStream.CopyToAsync(fileStream);
                 }
 
-                // Verify before touching anything: must be a readable zip that
+                // SIGNATURE CHECK - mandatory. Fetch <asset>.sig and verify the
+                // zip against the embedded public key before anything else.
+                bool sigOk = false;
+                try
+                {
+                    string sigB64;
+                    using (var sigClient = new HttpClient())
+                    {
+                        sigClient.Timeout = TimeSpan.FromMinutes(2);
+                        sigClient.DefaultRequestHeaders.UserAgent.ParseAdd("RDHConsoleMode-AutoUpdate");
+                        sigB64 = await sigClient.GetStringAsync(info.DownloadUrl + ".sig");
+                    }
+                    using var rsa = System.Security.Cryptography.RSA.Create();
+                    rsa.ImportFromPem(RdhUpdatePublicKeyPem);
+                    sigOk = rsa.VerifyData(File.ReadAllBytes(zipPath),
+                        Convert.FromBase64String(sigB64.Trim()),
+                        System.Security.Cryptography.HashAlgorithmName.SHA256,
+                        System.Security.Cryptography.RSASignaturePadding.Pss);
+                }
+                catch (Exception sigEx)
+                {
+                    App.StartupTrace($"RDH auto-update: signature fetch/verify failed: {sigEx.Message}");
+                }
+                if (!sigOk)
+                {
+                    App.StartupTrace("RDH auto-update: SIGNATURE INVALID OR MISSING - update discarded.");
+                    try { File.Delete(zipPath); } catch { }
+                    return;
+                }
+                App.StartupTrace("RDH auto-update: signature verified.");
+
+                // Secondary sanity: must be a readable zip that
                 // actually contains gcmloader.exe.
                 bool zipOk = false;
                 try
