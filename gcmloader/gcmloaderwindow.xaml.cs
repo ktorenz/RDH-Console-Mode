@@ -8080,14 +8080,13 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                 // at a folder that does not exist on a shipped unit (different
                 // account, no Downloads) - bricking every account to no shell.
                 // Only self-register from a real install.
-                string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-                string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-                bool installed =
-                    (!string.IsNullOrEmpty(progFiles) && targetExecutable.StartsWith(progFiles, StringComparison.OrdinalIgnoreCase)) ||
-                    (!string.IsNullOrEmpty(progFilesX86) && targetExecutable.StartsWith(progFilesX86, StringComparison.OrdinalIgnoreCase));
-                if (!installed)
+                // The requirement is NOT "must be under Program Files" - a
+                // single-purpose console may legitimately install to a stable
+                // root path such as C:\RDH-Console-Mode. What must be rejected is
+                // anything inside a user profile, temp, or a non-fixed volume.
+                if (!RdhIsStableShellPath(targetExecutable, out string rdhShellReason))
                 {
-                    App.StartupTrace($"RDH: shell registration SKIPPED - '{targetExecutable}' is not under Program Files (test/dev run).");
+                    App.StartupTrace($"RDH: shell registration SKIPPED - {rdhShellReason}: '{targetExecutable}'");
                     return;
                 }
 
@@ -8459,16 +8458,44 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
                             string targetExecutable = GcmWindowsShellService.ResolveStableExecutablePath(
                                 Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty);
-                            await GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(targetExecutable, arguments: null);
+                            // RDH patch: THIS is the real boot stall. The restore
+                            // waits up to ~10s for the shell, and the wait below
+                            // adds ~10s more - all in front of the Playnite launch.
+                            // Playnite does not need the desktop shell, so in
+                            // Playnite mode both run in the background.
+                            if (RdhDirectPlayniteMode())
+                            {
+                                _ = Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        await GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(targetExecutable, arguments: null);
+                                        await WaitForWindowsShellAsync(maxAttempts: 100, delayMs: 100);
+                                        App.StartupTrace("RDH: winpart explorer restore finished in background.");
+                                    }
+                                    catch (Exception bgEx)
+                                    {
+                                        App.StartupTrace($"RDH: winpart background restore failed: {bgEx.Message}");
+                                    }
+                                });
+                                App.StartupTrace("RDH: winpart explorer restore backgrounded (non-blocking).");
+                            }
+                            else
+                            {
+                                await GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(targetExecutable, arguments: null);
+                            }
                         }
 
                         // --- OPTIMIZATION: Smart Wait for Explorer ---
                         // Instead of freezing the app for 5 seconds, we wait asynchronously 
                         // until the Windows Taskbar is actually created by explorer.exe.
-                        await WaitForWindowsShellAsync(maxAttempts: 100, delayMs: 100);
-
-                        // Give Windows a tiny moment to draw the desktop icons properly
-                        await Task.Delay(500);
+                        // RDH patch: skipped in Playnite mode - the background
+                        // task above owns it so boot is not held up.
+                        if (!RdhDirectPlayniteMode())
+                        {
+                            await WaitForWindowsShellAsync(maxAttempts: 100, delayMs: 100);
+                            await Task.Delay(500);
+                        }
                         // ---------------------------------------------
 
                         // Now safely hide everything
@@ -9523,6 +9550,52 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
         // Diese Methode kümmert sich am Ende NUR noch um das reine Öffnen des Launchers.
         // --- RDH patch helpers ------------------------------------------------
+        // Safe to register as the machine-wide shell only if the path resolves
+        // for every account on every boot: not in a user profile, not temp, on a
+        // fixed disk, and present right now.
+        private static bool RdhIsStableShellPath(string exePath, out string reason)
+        {
+            reason = "ok";
+            try
+            {
+                if (string.IsNullOrWhiteSpace(exePath)) { reason = "empty path"; return false; }
+                string full = Path.GetFullPath(exePath);
+                if (!File.Exists(full)) { reason = "target does not exist"; return false; }
+
+                string winRoot = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows)) ?? Path.GetPathRoot(Environment.SystemDirectory);
+                string[] rejected =
+                {
+                    Path.Combine(winRoot, "Users"),
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    Path.GetTempPath(),
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
+                };
+                foreach (string bad in rejected)
+                {
+                    if (!string.IsNullOrWhiteSpace(bad) &&
+                        full.StartsWith(bad.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    {
+                        reason = "path is inside a user profile or temp folder";
+                        return false;
+                    }
+                }
+
+                string root = Path.GetPathRoot(full);
+                if (!string.IsNullOrWhiteSpace(root) && new DriveInfo(root).DriveType != DriveType.Fixed)
+                {
+                    reason = "path is not on a fixed disk";
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = "path check failed: " + ex.Message;
+                return false;
+            }
+        }
+
         // Public half of the RDH update-signing key. The private key lives only
         // on the build machine (never in this repo). Every release zip must be
         // accompanied by a .sig asset (RSA-PSS SHA-256, base64); an update whose
