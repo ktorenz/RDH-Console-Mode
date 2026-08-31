@@ -109,27 +109,36 @@ namespace gcmloader
                 int delaySeconds = 8;
                 try { delaySeconds = Math.Max(0, AppSettings.Load<int>("controller_prompt_delay")); } catch { }
 
+                // Start the paired-device check IMMEDIATELY, concurrently with
+                // waiting for Playnite. Device enumeration takes a moment, and
+                // doing it after the wait added that cost on top of Playnite's
+                // own ~9s startup. By the time Playnite's window exists the
+                // answer is already known.
+                Task<bool> pairedCheck = RdhAnyGamepadPairedAsync();
+
                 // Wait for Playnite's window so the prompt lands on the boot
-                // video / login screen, never on a black boot.
-                for (int i = 0; i < 150; i++)
+                // video / login screen, never on a black boot. Polled tightly
+                // so the overlay appears the moment the window exists.
+                for (int i = 0; i < 400; i++)
                 {
                     var p = Process.GetProcessesByName("Playnite.FullscreenApp").FirstOrDefault();
                     if (p != null && p.MainWindowHandle != IntPtr.Zero) break;
-                    await Task.Delay(400);
+                    await Task.Delay(150);
                 }
-                // If NOTHING is paired this is a first-boot console and the
-                // customer needs the instruction immediately - only settle long
-                // enough for Playnite to paint. The configured delay applies
-                // solely to the already-paired case, where the prompt is a
-                // fallback rather than the main event.
-                if (await RdhAnyGamepadPairedAsync())
+
+                bool alreadyPaired;
+                try { alreadyPaired = await pairedCheck; }
+                catch { alreadyPaired = true; }
+
+                if (alreadyPaired)
                 {
+                    // Nothing to instruct - the configured delay applies only to
+                    // this fallback case.
                     await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
                 }
                 else
                 {
-                    App.StartupTrace("RDH controller prompt: nothing paired - prompting immediately.");
-                    await Task.Delay(1200);
+                    App.StartupTrace("RDH controller prompt: nothing paired - prompting as soon as Playnite is up.");
                 }
 
                 bool overlayShown = false;

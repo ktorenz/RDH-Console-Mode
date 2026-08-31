@@ -9814,11 +9814,18 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
                 DispatcherQueue.TryEnqueue(() => TransitionToMainUI(force: true));
 
                 // TransitionToMainUI's SetWindowPos lacks SWP_NOACTIVATE and can
-                // steal foreground; hand it straight back to Playnite.
-                await Task.Delay(750);
+                // steal foreground. Previously we waited 750ms before handing it
+                // back, which was long enough to SEE the GCM shell. Re-assert
+                // Playnite immediately and again as the z-order settles, so the
+                // reveal happens behind Playnite rather than in front of it.
                 if (playnite != null && playnite.MainWindowHandle != IntPtr.Zero)
                 {
-                    await ForcefullyBringToForeground(playnite.MainWindowHandle);
+                    foreach (int wait in new[] { 0, 120, 350, 800 })
+                    {
+                        if (wait > 0) await Task.Delay(wait);
+                        MakeSelfNonTopmost();
+                        await ForcefullyBringToForeground(playnite.MainWindowHandle);
+                    }
                 }
             }
             catch (Exception ex)
