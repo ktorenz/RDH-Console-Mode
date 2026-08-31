@@ -50,6 +50,54 @@ namespace gcmloader
             catch { return false; }
         }
 
+        private DateTime _rdhPairedCheckedUtc = DateTime.MinValue;
+        private bool _rdhPairedCached;
+
+        // Is a gamepad already BONDED to this machine? A paired controller that
+        // is simply switched off must NOT trigger the prompt - the customer just
+        // turns it on and Windows reconnects it. The prompt is only for a console
+        // that has never been paired with a controller at all.
+        // Result cached briefly so the 2s poll does not hammer device enumeration.
+        private async Task<bool> RdhAnyGamepadPairedAsync()
+        {
+            if ((DateTime.UtcNow - _rdhPairedCheckedUtc).TotalSeconds < 15)
+            {
+                return _rdhPairedCached;
+            }
+
+            try
+            {
+                const string pairedAqs =
+                    "(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" OR " +
+                    "System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\") AND " +
+                    "System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True";
+
+                var found = await DeviceInformation.FindAllAsync(
+                    pairedAqs, null, DeviceInformationKind.AssociationEndpoint);
+
+                bool any = found.Any(di =>
+                {
+                    string n = di.Name ?? string.Empty;
+                    return n.IndexOf("xbox", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("controller", StringComparison.OrdinalIgnoreCase) >= 0
+                        || n.IndexOf("gamepad", StringComparison.OrdinalIgnoreCase) >= 0;
+                });
+
+                _rdhPairedCached = any;
+                _rdhPairedCheckedUtc = DateTime.UtcNow;
+                return any;
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH paired-gamepad check failed: {ex.Message}");
+                // On failure assume paired, so a broken check cannot spam the
+                // prompt at a customer who already has a working controller.
+                _rdhPairedCached = true;
+                _rdhPairedCheckedUtc = DateTime.UtcNow;
+                return true;
+            }
+        }
+
         private async Task RdhControllerPromptLoopAsync()
         {
             try
@@ -85,7 +133,15 @@ namespace gcmloader
                     }
                     else if (!connected && !overlayShown)
                     {
-                        App.StartupTrace("RDH controller prompt: no controller, showing overlay.");
+                        // Only prompt when NOTHING is bonded. A paired controller
+                        // that is merely switched off needs no instructions.
+                        if (await RdhAnyGamepadPairedAsync())
+                        {
+                            await Task.Delay(3000);
+                            continue;
+                        }
+
+                        App.StartupTrace("RDH controller prompt: no controller paired, showing overlay.");
                         DispatcherQueue.TryEnqueue(RdhShowPairOverlay);
                         RdhStartBtAutoPair();
                         overlayShown = true;
