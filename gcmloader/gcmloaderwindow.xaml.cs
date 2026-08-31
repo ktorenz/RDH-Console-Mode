@@ -5729,8 +5729,17 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     Debug.WriteLine("Starting persistent taskbar hiding loop...");
                     while (!_taskbarHiderCts.Token.IsCancellationRequested)
                     {
-                        // Use your robust hide method
-                        TaskbarVisibility.HideTaskbar();
+                        // RDH patch: yield while Start menu / Search / Explorer
+                        // holds the foreground so the desktop stays reachable;
+                        // resume hiding as soon as Playnite or GCM is back.
+                        if (RdhShouldPauseTaskbarHiding())
+                        {
+                            TaskbarVisibility.ShowTaskbar();
+                        }
+                        else
+                        {
+                            TaskbarVisibility.HideTaskbar();
+                        }
                         try
                         {
                             // Check and hide 4 times per second.x
@@ -9448,6 +9457,37 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
         // Diese Methode kümmert sich am Ende NUR noch um das reine Öffnen des Launchers.
         // --- RDH patch helpers ------------------------------------------------
+        private static class RdhFg
+        {
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+        }
+
+        // True while the user is on the desktop side of the machine: Start menu,
+        // Search, or any Explorer surface (file window, desktop) holds the
+        // foreground. The taskbar-hiding loop yields during that time; without
+        // this, a Win-key press loses a 20x/second race against HideTaskbar and
+        // the desktop is effectively unreachable.
+        private static bool RdhShouldPauseTaskbarHiding()
+        {
+            if (!RdhDirectPlayniteMode()) return false;
+            try
+            {
+                IntPtr fg = RdhFg.GetForegroundWindow();
+                if (fg == IntPtr.Zero) return false;
+                RdhFg.GetWindowThreadProcessId(fg, out uint pid);
+                if (pid == 0) return false;
+                using var proc = Process.GetProcessById((int)pid);
+                string n = proc.ProcessName;
+                return n.Equals("StartMenuExperienceHost", StringComparison.OrdinalIgnoreCase)
+                    || n.Equals("SearchHost", StringComparison.OrdinalIgnoreCase)
+                    || n.Equals("SearchApp", StringComparison.OrdinalIgnoreCase)
+                    || n.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase)
+                    || n.Equals("explorer", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
         private static string RdhSettingsDir => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "gcmsettings");
 
