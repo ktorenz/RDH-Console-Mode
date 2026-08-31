@@ -1,0 +1,238 @@
+name: Build and Create Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number for the installer'
+        required: false
+        default: '1.0.0'
+      build_configuration:
+        description: 'Build configuration'
+        required: true
+        default: 'Debug'
+        type: choice
+        options:
+          - Debug
+          - Release
+      platform:
+        description: 'Platform architecture'
+        required: true
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - x86
+          - ARM64
+      create_release:
+        description: 'Create GitHub release'
+        required: true
+        default: false
+        type: boolean
+      release_notes:
+        description: 'Release notes (if creating release)'
+        required: false
+        default: 'Development build'
+
+env:
+  SOLUTION_PATH: './GAMINGCONSOLEMODE.sln'
+  DOTNET_VERSION: '8.0.x'
+  INNO_SETUP_VERSION: '6.2.2'
+  ISS_FILE: '.github/installer.iss'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  build-and-package:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact-name: ${{ steps.artifact-name.outputs.name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache .NET packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/.dotnet/tools
+          key: ${{ runner.os }}-dotnet-${{ hashFiles('**/*.csproj', '**/*.sln') }}
+          restore-keys: |
+            ${{ runner.os }}-dotnet-
+
+      - name: Cache Inno Setup
+        id: cache-inno
+        uses: actions/cache@v4
+        with:
+          # KORRIGIERT: Korrekte Syntax für den Pfad
+          path: ${{ env['ProgramFiles(x86)'] }}\Inno Setup 6
+          key: inno-setup-${{ env.INNO_SETUP_VERSION }}
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $baseVersion = "${{ github.event.inputs.version }}"
+          if ("${{ github.event.inputs.create_release }}" -eq "false") {
+            $version = "${baseVersion}-dev.${{ github.run_number }}"
+          } else {
+            $version = $baseVersion
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ENTFERNT: Die unnötige Installation von MAUI-Workloads wurde entfernt.
+
+      # NEU & VEREINFACHT: Baut die Projekte so, wie es Visual Studio tut.
+     # FIXED: Restore with RID for ReadyToRun, Build solution via Platform property
+      - name: Build Projects
+        shell: pwsh
+        run: |
+          $config = "${{ github.event.inputs.build_configuration }}"
+          $platformInput = "${{ github.event.inputs.platform }}"
+          
+          Write-Host "📦 Restoring solution packages..."
+          dotnet restore ${{ env.SOLUTION_PATH }}
+          if ($LASTEXITCODE -ne 0) { throw "Solution restore failed!" }
+          
+          Write-Host "`n🔨 Building solution for Platform='$platformInput'..."
+          # WICHTIG: PublishReadyToRun=false deaktiviert die problematische Optimierung
+          dotnet build ${{ env.SOLUTION_PATH }} --configuration $config /p:Platform=$platformInput --no-restore /p:PublishReadyToRun=false
+          if ($LASTEXITCODE -ne 0) { throw "Solution build failed!" }
+
+          Write-Host "`n✅ Build erfolgreich ohne SAC-kritische Optimierungen!"
+
+      # NEU & VEREINFACHT: Findet und kopiert die korrekten Build-Ordner.
+      - name: Prepare installer files
+        shell: pwsh
+        run: |
+          Write-Host "📦 Preparing installer files from build output..."
+          New-Item -ItemType Directory -Force -Path "./installer-files"
+          
+          $config = "${{ github.event.inputs.build_configuration }}"
+          
+          $projects = @{
+            "GAMINGCONSOLEMODE" = @{ "targetFolder" = "." }
+            "gcmloader" = @{ "targetFolder" = "gcmloader" }
+            "OverlayWindow" = @{ "targetFolder" = "OverlayWindow" }
+            "wingamepad" = @{ "targetFolder" = "wingamepad" }
+          }
+          
+          foreach ($projectName in $projects.Keys) {
+            $project = $projects[$projectName]
+            $searchPath = "./$projectName/bin"
+            
+            Write-Host "`n📍 Processing $projectName..."
+            $buildOutputExe = Get-ChildItem -Path $searchPath -Filter "$projectName.exe" -Recurse | Select-Object -First 1
+            
+            if ($buildOutputExe) {
+              $sourceDir = $buildOutputExe.Directory.FullName
+              Write-Host "  ✅ Found build output at: $sourceDir"
+              
+              $targetPath = if ($project.targetFolder -eq ".") { "./installer-files" } else { "./installer-files/$($project.targetFolder)" }
+              New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
+              
+              Write-Host "  📦 Copying all build files to '$targetPath'..."
+              Copy-Item -Path "$sourceDir\*" -Destination $targetPath -Recurse -Force
+              Write-Host "  📊 Copied $(@(Get-ChildItem -Path $targetPath -Recurse).Count) files."
+            } else {
+              Write-Warning "  ❌ Could not find build output for '$projectName' in '$searchPath'."
+            }
+          }
+          
+          Write-Host "`n🎨 Looking for logo.ico..."
+          $logoSource = Get-ChildItem -Path "./gcmloader/", "./" -Filter "logo.ico" -Recurse | Select-Object -First 1
+          if ($logoSource) {
+            Copy-Item -Path $logoSource.FullName -Destination "./installer-files/gcmloader/logo.ico" -Force
+            Write-Host "✅ Logo copied."
+          }
+
+      - name: Install Inno Setup
+        if: steps.cache-inno.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://files.jrsoftware.org/is/6/innosetup-${{ env.INNO_SETUP_VERSION }}.exe" -OutFile "$env:TEMP\innosetup.exe"
+          Start-Process -FilePath "$env:TEMP\innosetup.exe" -ArgumentList "/VERYSILENT", "/SP-" -Wait
+
+      - name: Setup Inno Setup PATH
+        shell: pwsh
+        run: |
+          $innoPath = "${env:ProgramFiles(x86)}\Inno Setup 6"
+          echo "$innoPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "INNO_PATH=$innoPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Update ISS file version
+        shell: pwsh
+        run: |
+          $issPath = "${{ env.ISS_FILE }}"
+          $version = "${{ steps.version.outputs.version }}"
+          $content = Get-Content $issPath -Raw
+          $newDefine = "#define MyAppVersion `"$version`""
+          if ($content -match '#define MyAppVersion ".*"') {
+            $content = $content -replace '#define MyAppVersion ".*"', $newDefine
+          } else {
+            $content = "$newDefine`n" + $content
+          }
+          [System.IO.File]::WriteAllText($issPath, $content, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          Write-Host "🔨 Building installer..."
+          & "${env:INNO_PATH}\ISCC.exe" /Q /O"./output" "${{ env.ISS_FILE }}"
+          if ($LASTEXITCODE -ne 0) { throw "❌ Installer build failed!" }
+          Write-Host "✅ Installer build complete!"
+
+      - name: Generate artifact name
+        id: artifact-name
+        shell: pwsh
+        run: |
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $config = "${{ github.event.inputs.build_configuration }}".ToLower()
+          $name = "GCM-installer-${{ steps.version.outputs.version }}-$config-$shortSha"
+          echo "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact-name.outputs.name }}
+          path: ./output/*.exe
+
+  create-release:
+    needs: build-and-package
+    runs-on: ubuntu-latest
+    if: github.event.inputs.create_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-and-package.outputs.artifact-name }}
+          path: ./installer
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build-and-package.outputs.version }}
+          name: GCM Release ${{ needs.build-and-package.outputs.version }}
+          draft: true
+          files: ./installer/*.exe
+          body: |
+            ## 🎮 GCM v${{ needs.build-and-package.outputs.version }}
+            
+            **Release Notes:**
+            ${{ github.event.inputs.release_notes }}
+            
+            ---
+            **Important:** This is a framework-dependent application. To run it, you need the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) and the [Windows App SDK Runtime](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads) to be installed.

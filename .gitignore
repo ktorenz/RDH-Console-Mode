@@ -1,0 +1,6 @@
+bin/
+obj/
+.vs/
+*.user
+*.v268-orig
+GAMINGCONSOLEMODE.sln.lnk
