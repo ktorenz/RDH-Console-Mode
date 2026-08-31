@@ -174,6 +174,8 @@ namespace gcmloader
             public string VersionText { get; set; }
             public string DisplayTitle { get; set; }
             public string HtmlUrl { get; set; }
+            // RDH patch: direct link to the release's .zip asset for auto-update
+            public string DownloadUrl { get; set; }
         }
 
         private sealed class AudioRenderDeviceInfo
@@ -8209,13 +8211,44 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     ? urlElement.GetString()
                     : "https://github.com/ktorenz/RDH-Console-Mode/releases/latest";
 
+                // RDH patch: grab the first .zip asset for auto-update
+                string downloadUrl = null;
+                if (root.TryGetProperty("assets", out JsonElement assetsElement) &&
+                    assetsElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement asset in assetsElement.EnumerateArray())
+                    {
+                        string assetName = asset.TryGetProperty("name", out JsonElement an) ? an.GetString() : null;
+                        string assetUrl = asset.TryGetProperty("browser_download_url", out JsonElement au) ? au.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(assetUrl) &&
+                            assetName != null && assetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                        {
+                            downloadUrl = assetUrl;
+                            break;
+                        }
+                    }
+                }
+
                 _availableGithubReleaseUpdate = new GithubReleaseInfo
                 {
                     ReleaseVersion = latestReleaseVersion,
                     VersionText = string.IsNullOrWhiteSpace(releaseTag) ? FormatVersion(latestReleaseVersion) : releaseTag.Trim(),
                     DisplayTitle = string.IsNullOrWhiteSpace(releaseName) ? $"GitHub Release {FormatVersion(latestReleaseVersion)}" : releaseName.Trim(),
-                    HtmlUrl = string.IsNullOrWhiteSpace(releaseUrl) ? "https://github.com/ktorenz/RDH-Console-Mode/releases/latest" : releaseUrl.Trim()
+                    HtmlUrl = string.IsNullOrWhiteSpace(releaseUrl) ? "https://github.com/ktorenz/RDH-Console-Mode/releases/latest" : releaseUrl.Trim(),
+                    DownloadUrl = downloadUrl
                 };
+
+                // RDH patch: in Playnite mode with a zip asset and auto_update not
+                // disabled, update silently: download, verify, swap, relaunch.
+                // Playnite is a separate process and keeps running throughout.
+                bool rdhAutoUpdate = true;
+                try { rdhAutoUpdate = AppSettings.Load<bool>("auto_update"); } catch { }
+                if (RdhDirectPlayniteMode() && rdhAutoUpdate && !string.IsNullOrWhiteSpace(downloadUrl))
+                {
+                    App.StartupTrace($"RDH auto-update: {FormatVersion(currentVersion)} -> {FormatVersion(latestReleaseVersion)}");
+                    _ = RdhAutoUpdateAsync(_availableGithubReleaseUpdate);
+                    return;
+                }
 
                 DispatcherQueue.TryEnqueue(() =>
                 {
@@ -9670,6 +9703,90 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                 App.StartupTrace($"RDH deferred reveal failed: {ex.Message}");
             }
         }
+        // Silent self-update: download the release zip, verify it is a real
+        // archive containing gcmloader.exe, write a small PowerShell applier,
+        // exit, let the applier extract over the install folder and relaunch.
+        // On any failure the machine keeps running the current version and the
+        // check simply repeats on the next start.
+        private async Task RdhAutoUpdateAsync(GithubReleaseInfo info)
+        {
+            try
+            {
+                string updateDir = Path.Combine(RdhSettingsDir, "update");
+                Directory.CreateDirectory(updateDir);
+                string zipPath = Path.Combine(updateDir, "rdh-update.zip");
+
+                ShowInAppNotification($"Downloading update {info.VersionText}...");
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromMinutes(10);
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("RDHConsoleMode-AutoUpdate");
+                    using var response = await client.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead);
+                    response.EnsureSuccessStatusCode();
+                    await using var httpStream = await response.Content.ReadAsStreamAsync();
+                    await using var fileStream = File.Create(zipPath);
+                    await httpStream.CopyToAsync(fileStream);
+                }
+
+                // Verify before touching anything: must be a readable zip that
+                // actually contains gcmloader.exe.
+                bool zipOk = false;
+                try
+                {
+                    using var archive = System.IO.Compression.ZipFile.OpenRead(zipPath);
+                    zipOk = archive.Entries.Any(e =>
+                        string.Equals(e.Name, "gcmloader.exe", StringComparison.OrdinalIgnoreCase));
+                }
+                catch { }
+                if (!zipOk)
+                {
+                    App.StartupTrace("RDH auto-update: downloaded file failed verification, aborting.");
+                    try { File.Delete(zipPath); } catch { }
+                    return;
+                }
+
+                string installDir = AppContext.BaseDirectory.TrimEnd('\\');
+                string exePath = Path.Combine(installDir, "gcmloader.exe");
+                int myPid = Environment.ProcessId;
+
+                string script = string.Join(Environment.NewLine, new[]
+                {
+                    "param([int]$ProcId, [string]$Zip, [string]$Dest, [string]$Exe)",
+                    "try { Wait-Process -Id $ProcId -Timeout 90 -ErrorAction SilentlyContinue } catch {}",
+                    "Start-Sleep -Seconds 2",
+                    "for ($i = 0; $i -lt 3; $i++) {",
+                    "    try {",
+                    "        Expand-Archive -LiteralPath $Zip -DestinationPath $Dest -Force -ErrorAction Stop",
+                    "        break",
+                    "    } catch { Start-Sleep -Seconds 3 }",
+                    "}",
+                    "Remove-Item -LiteralPath $Zip -Force -ErrorAction SilentlyContinue",
+                    "Start-Process -FilePath $Exe -WorkingDirectory $Dest"
+                });
+                string scriptPath = Path.Combine(updateDir, "rdh-apply-update.ps1");
+                File.WriteAllText(scriptPath, script);
+
+                App.StartupTrace($"RDH auto-update: applying {info.VersionText}, restarting shell.");
+                ShowInAppNotification("Applying update, restarting...");
+                await Task.Delay(1500);
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{scriptPath}\" -ProcId {myPid} -Zip \"{zipPath}\" -Dest \"{installDir}\" -Exe \"{exePath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                Process.Start(psi);
+
+                Environment.Exit(0);
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH auto-update failed: {ex.Message}");
+            }
+        }
+
         // --- end RDH patch helpers --------------------------------------------
 
         private async Task StartConfiguredLauncherAsync()
