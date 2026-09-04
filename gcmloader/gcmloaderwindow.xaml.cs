@@ -4500,11 +4500,19 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     try
                     {
                         App.StartupTrace("Root element setup begin.");
+                        // RDH patch (26.9.4.4): per-step trace. A 0xC000027B stowed exception here
+                        // bypasses every managed handler and leaves no dump on the console (WER is
+                        // disabled), so the only way to localise it is to bracket each call.
                         InstallNativeScalingHook();
+                        App.StartupTrace("Root element setup: native scaling hook installed.");
                         SetupScalingEvents(rootElement);
+                        App.StartupTrace("Root element setup: scaling events wired.");
                         RefreshScalingLayout("InitialLoad", forceMonitorResize: true);
+                        App.StartupTrace("Root element setup: initial scaling layout refreshed.");
                         StartRuntimeScaleMonitor();
+                        App.StartupTrace("Root element setup: runtime scale monitor started.");
                         FocusSink?.Focus(FocusState.Programmatic);
+                        App.StartupTrace("Root element setup: focus sink focused.");
 
                         if (!_isVideoPlaybackInitiated)
                         {
@@ -7444,6 +7452,25 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                 // helper's "start only if not running" guard fall through and launch a new one.
                 Console.WriteLine("Restoring Explorer as the desktop shell...");
 
+                // Resolve the shell target first: it is needed BEFORE the kill (see below).
+                string desktopShellTarget = GcmWindowsShellService.ResolveStableExecutablePath(
+                    Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty);
+
+                // RDH patch (26.9.4.4): stop the taskbar hider BEFORE a fresh taskbar can exist.
+                // The 50ms hide loop kept running after the handoff and landed one last
+                // ShowWindow(SW_HIDE) on the NEW Shell_TrayWnd in the gap before Environment.Exit,
+                // leaving the restored desktop with an invisible taskbar (verified on RTRMCHN-J9GFH7).
+                _taskbarHiderCts?.Cancel();
+                App.StartupTrace("BackToWindows: taskbar hider cancelled.");
+
+                // RDH patch (26.9.4.4): point the Winlogon Shell value at explorer BEFORE killing
+                // explorer. With AutoRestartShell=1, killing explorer while Shell still named the
+                // GCM loader made Winlogon spawn a spurious NON-elevated gcmloader (it hit the mutex
+                // and exited, but it was a wasted elevated relaunch). Pre-setting explorer means any
+                // AutoRestartShell reaction launches explorer, which is what we want anyway. The
+                // helper below sets it again and restores the GCM loader in its finally.
+                GcmWindowsShellService.SetEnabled(desktopShellTarget, arguments: null, enabled: false);
+
                 // Kill all running instances of explorer
                 KillProcess("explorer.exe");
 
@@ -7452,13 +7479,18 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
 
                 // Start a fresh explorer.exe AS THE SHELL, restoring HKLM Shell to the GCM
                 // loader afterwards (handled inside the helper's finally).
-                string desktopShellTarget = GcmWindowsShellService.ResolveStableExecutablePath(
-                    Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty);
                 bool desktopShellReady = await GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(
                     desktopShellTarget, arguments: null);
-                App.StartupTrace(desktopShellReady
-                    ? "BackToWindows: desktop shell restored (Shell_TrayWnd present)."
-                    : "BackToWindows: desktop shell restore timed out; explorer may be a file window.");
+
+                // RDH patch (26.9.4.4): the fresh taskbar must be VISIBLE, not merely present.
+                // Force auto-hide OFF (the hider set ABS_AUTOHIDE on the live tray, which explorer
+                // may have persisted to StuckRects3) and un-hide both tray windows explicitly.
+                TaskbarManager.ForceAutoHideOff();
+                TaskbarVisibility.ShowTaskbar();
+                bool taskbarVisible = TaskbarVisibility.IsTaskbarVisible();
+                App.StartupTrace(desktopShellReady && taskbarVisible
+                    ? "BackToWindows: desktop shell restored (Shell_TrayWnd present and visible)."
+                    : $"BackToWindows: desktop restore incomplete (shellReady={desktopShellReady}, taskbarVisible={taskbarVisible}).");
             }
             catch (Exception ex)
             {
@@ -19538,6 +19570,16 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
             */
         }
 
+        [DllImport("user32.dll")]
+        static extern bool IsWindowVisible(IntPtr hWnd);
+
+        // RDH patch (26.9.4.4): "present" is not "visible". The desktop-restore log gates on this.
+        public static bool IsTaskbarVisible()
+        {
+            IntPtr h = FindWindow("Shell_TrayWnd", null);
+            return h != IntPtr.Zero && IsWindowVisible(h);
+        }
+
         public static void ShowTaskbar()
         {
             IntPtr taskbarHandle = FindWindow("Shell_TrayWnd", null);
@@ -19647,6 +19689,14 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
             {
                 SetAutoHide(_originalState.Value);
             }
+        }
+
+        // RDH patch (26.9.4.4): RestoreOriginalState is a no-op if the original state was
+        // never captured, and the fresh explorer started by the desktop handoff may load a
+        // persisted auto-hide from StuckRects3. Force it OFF rather than assume.
+        public static void ForceAutoHideOff()
+        {
+            SetAutoHide(false);
         }
 
         /// <summary>
