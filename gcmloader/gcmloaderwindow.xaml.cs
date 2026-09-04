@@ -9929,8 +9929,28 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
         // Playnite later lands on a fully drawn GCM instead of a black window.
         private static bool RdhDirectPlayniteMode()
         {
-            try { return AppSettings.Load<string>("launcher") == "playnite"; }
-            catch { return false; }
+            // RDH patch (26.9.4.6): an ABSENT or blank launcher means a fresh
+            // %APPDATA%\gcmsettings - e.g. a profile newly bound after a
+            // sysprep /generalize, or any new account. This fork SHIPS Playnite,
+            // so absent must resolve to playnite, NOT steam.
+            //
+            // Why returning false here was a real defect: InitializeSettingsOverlay
+            // calls ApplySteamOnlyMode() BEFORE EnsureSettingsDefaults(). With no
+            // launcher key, the old catch returned false, ApplySteamOnlyMode wrote
+            // launcher = "steam", and every later default was then "already set" -
+            // so the console booted into Steam mode with live-process cards instead
+            // of its library. AppSettings.initialconfig() appears to set playnite,
+            // but its only caller AppSettings.FirstStart() is never invoked, so that
+            // path is dead and cannot be relied on.
+            //
+            // An EXPLICIT "steam" still selects Steam mode; only absent/blank changes.
+            try
+            {
+                string launcher = AppSettings.Load<string>("launcher");
+                if (string.IsNullOrWhiteSpace(launcher)) { return true; }
+                return launcher == "playnite";
+            }
+            catch { return true; }
         }
 
         private async Task DeferredUiRevealAsync()

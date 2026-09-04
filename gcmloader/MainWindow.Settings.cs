@@ -1150,6 +1150,12 @@ namespace gcmloader
             EnsureBooleanSetting("show_discord", true);
             EnsureBooleanSetting("uac", false);   // RDH: console never prompts
 
+            // RDH patch (26.9.4.6): persist the launcher default HERE. AppSettings
+            // .initialconfig() also sets it, but its only caller FirstStart() is
+            // never invoked anywhere in the codebase, so that path never runs.
+            // EnsureStringSetting only writes when the key is missing, so an
+            // explicit user choice is never overwritten.
+            EnsureStringSetting("launcher", "playnite");
             EnsureStringSetting("steamlauncherpath", string.Empty);
             EnsureStringSetting("startupvideo_path", string.Empty);
             EnsureStringSetting("preaudiostart", GetDefaultAudioDeviceName());
