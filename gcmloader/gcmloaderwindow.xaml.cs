@@ -2400,7 +2400,10 @@ namespace gcmloader
 
             GetLivePhysicalResolution(out int physicalWidth, out int physicalHeight);
 
-            if (logicalWidth <= 0 || logicalHeight <= 0 || physicalWidth <= 0 || physicalHeight <= 0)
+            // RDH patch (26.9.4.5): also reject NaN/Infinity, which "<= 0" does not catch.
+            if (double.IsNaN(logicalWidth) || double.IsInfinity(logicalWidth) ||
+                double.IsNaN(logicalHeight) || double.IsInfinity(logicalHeight) ||
+                logicalWidth <= 0 || logicalHeight <= 0 || physicalWidth <= 0 || physicalHeight <= 0)
             {
                 return;
             }
@@ -2423,8 +2426,19 @@ namespace gcmloader
                    !string.Equals(reason, "InitialLoad", StringComparison.OrdinalIgnoreCase);
         }
 
+        // RDH patch (26.9.4.5): true while a scaling refresh is in progress. A nested call
+        // (SizeChanged fired by the SetWindowPos inside an active refresh) must coalesce,
+        // never run a second UpdateLayout inside the first.
+        private bool _isRefreshingScalingLayout;
+
         private void RefreshScalingLayout(string reason, bool forceMonitorResize = true)
         {
+            if (_isRefreshingScalingLayout)
+            {
+                App.StartupTrace($"RefreshScalingLayout({reason}) skipped: re-entrant call during an active refresh.");
+                return;
+            }
+            _isRefreshingScalingLayout = true;
             try
             {
                 var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
@@ -2492,6 +2506,11 @@ namespace gcmloader
             catch (Exception ex)
             {
                 Debug.WriteLine($"[GCM] Scaling layout refresh failed via {reason}: {ex}");
+                App.StartupTrace($"RefreshScalingLayout({reason}) failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                _isRefreshingScalingLayout = false;
             }
         }
 
@@ -2718,7 +2737,9 @@ namespace gcmloader
                 const double baseW = 1920.0;
                 const double baseH = 1080.0;
                 double ratio = Math.Min(logicalW / baseW, logicalH / baseH);
-                if (ratio <= 0) return;
+                // RDH patch (26.9.4.5): NaN <= 0 and Infinity <= 0 are both FALSE, so the old
+                // guard let a non-finite ratio reach ScaleTransform. Reject anything non-finite.
+                if (double.IsNaN(ratio) || double.IsInfinity(ratio) || ratio <= 0) return;
 
                 MainContent.Width = baseW;
                 MainContent.Height = baseH;
@@ -4507,8 +4528,36 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                         App.StartupTrace("Root element setup: native scaling hook installed.");
                         SetupScalingEvents(rootElement);
                         App.StartupTrace("Root element setup: scaling events wired.");
-                        RefreshScalingLayout("InitialLoad", forceMonitorResize: true);
-                        App.StartupTrace("Root element setup: initial scaling layout refreshed.");
+                        // RDH patch (26.9.4.5): NEVER run the initial scaling refresh synchronously
+                        // inside Loaded. Loaded fires during the XAML layout/render tick. Inside
+                        // RefreshScalingLayout, TryResizeWindowToCurrentMonitor calls SetWindowPos,
+                        // which PUMPS SENT MESSAGES - including the work-area WM_SETTINGCHANGE that
+                        // explorer broadcasts when winpart hid the taskbar a few hundred ms earlier.
+                        // That fires SizeChanged, whose handler (wired one line above) re-enters
+                        // RefreshScalingLayout; the outer call then mutates the tree and calls
+                        // UpdateLayout on a tree XAML already considers mid-layout. Result: a
+                        // 0xC000027B stowed exception no try/catch can see (5 of 7 relaunches on
+                        // RTRMCHN-J9GFH7 when the taskbar was visible at launch). Deferring one
+                        // dispatcher turn moves the whole refresh out of the Loaded tick.
+                        bool scalingQueued = DispatcherQueue.TryEnqueue(() =>
+                        {
+                            try
+                            {
+                                RefreshScalingLayout("InitialLoad", forceMonitorResize: true);
+                                App.StartupTrace("Root element setup: initial scaling layout refreshed (deferred).");
+                            }
+                            catch (Exception deferredEx)
+                            {
+                                App.StartupTrace($"Root element setup: deferred scaling refresh failed: {deferredEx.Message}");
+                            }
+                        });
+                        App.StartupTrace(scalingQueued
+                            ? "Root element setup: initial scaling layout refresh queued."
+                            : "Root element setup: could not queue scaling refresh; running inline.");
+                        if (!scalingQueued)
+                        {
+                            RefreshScalingLayout("InitialLoad", forceMonitorResize: true);
+                        }
                         StartRuntimeScaleMonitor();
                         App.StartupTrace("Root element setup: runtime scale monitor started.");
                         FocusSink?.Focus(FocusState.Programmatic);
