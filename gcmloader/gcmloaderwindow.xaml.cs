@@ -9773,6 +9773,10 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
         {
             try
             {
+                // RDH patch (26.9.4.6): guarantee the file before every read. Belt and
+                // braces over the boot-time bootstrap: a missing file must never yield
+                // an empty apps column. Cheap - returns immediately when it exists.
+                RdhEnsureCardsFile();
                 string jsonPath = Path.Combine(RdhSettingsDir, "rdh_cards.json");
                 if (!File.Exists(jsonPath)) return new List<RdhFixedCard>();
                 return Newtonsoft.Json.JsonConvert.DeserializeObject<List<RdhFixedCard>>(
@@ -9824,6 +9828,54 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
             {
                 App.StartupTrace($"RDH cards file generation failed: {ex.Message}");
             }
+        }
+
+        // RDH patch (26.9.4.6): make a FRESH profile boot with the shipped settings.
+        // The gcmsettings folder lives inside the user profile (APPDATA). A new
+        // account, or a profile re-bound after sysprep /generalize, starts with it
+        // empty - and then rdh_cards.json (custom cards, card art, pairprompt art)
+        // and settings.toml (theme etc.) are gone from GCM's point of view even
+        // though the old folder is untouched on disk. Seed from a machine-level
+        // "defaults" folder beside the loader, which survives any seal:
+        //     [loader dir]/defaults/   ->   [APPDATA]/gcmsettings/
+        // Rules: NEVER overwrite (an existing profile file always wins, so a
+        // surviving profile is untouched); top-level files only; idempotent.
+        // The defaults folder is deliberately NOT part of the release zip -
+        // Expand-Archive -Force would otherwise replace the builder's customised
+        // copy on every auto-update. The builder populates it before the seal.
+        // If there is no defaults folder, or it holds no rdh_cards.json,
+        // RdhEnsureCardsFile still generates a detected-apps cards file so the
+        // apps column is never empty.
+        internal static void RdhBootstrapSettings()
+        {
+            try
+            {
+                string defaults = Path.Combine(AppContext.BaseDirectory, "defaults");
+                string dir = RdhSettingsDir;
+                Directory.CreateDirectory(dir);
+                if (Directory.Exists(defaults))
+                {
+                    int copied = 0, kept = 0;
+                    foreach (string src in Directory.EnumerateFiles(defaults, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        string dst = Path.Combine(dir, Path.GetFileName(src));
+                        if (File.Exists(dst)) { kept++; continue; }
+                        File.Copy(src, dst, overwrite: false);
+                        copied++;
+                    }
+                    App.StartupTrace($"RDH seed: {copied} file(s) copied from defaults into gcmsettings, {kept} existing kept.");
+                }
+                else
+                {
+                    App.StartupTrace("RDH seed: no defaults folder beside the loader; nothing to seed.");
+                }
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH seed failed: {ex.Message}");
+            }
+
+            RdhEnsureCardsFile();
         }
 
         private Border RdhBuildFixedCard(RdhFixedCard c)

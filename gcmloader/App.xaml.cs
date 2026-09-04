@@ -106,6 +106,15 @@ namespace gcmloader
             };
             StartupTrace("Toast activation handler attached.");
 
+            // RDH patch (26.9.4.6): seed gcmsettings from the machine-level defaults
+            // folder and guarantee rdh_cards.json BEFORE the window is created, so the
+            // very first settings read and the first card render already see them.
+            // Previously the cards file was only generated inside
+            // EnsureSettingsDefaults(), which runs solely when the settings overlay is
+            // opened - never at boot - so a fresh profile showed an empty apps column.
+            MainWindow.RdhBootstrapSettings();
+            StartupTrace("RDH settings bootstrap complete.");
+
             // 4. Hauptfenster erstellen
             StartupTrace("Creating MainWindow.");
             m_window = new MainWindow();
