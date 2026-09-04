@@ -7431,10 +7431,18 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     StartupControl.RestoreStartupApps();
                 }
 
-                // 2. Task Manager Style Restart
-                // By killing and restarting explorer.exe, Windows naturally rebuilds the 
-                // Taskbar, Desktop (Progman), and Icons without us needing to unhide them manually.
-                Console.WriteLine("Restarting explorer.exe (Task Manager style)...");
+                // 2. Hand the desktop back to Explorer as the SHELL.
+                // RDH patch: the stock "kill explorer, Process.Start(explorer)" restart only
+                // rebuilds the desktop when explorer is the REGISTERED shell. On this product
+                // HKLM\...\Winlogon\Shell = the GCM loader, so a bare explorer relaunch comes up
+                // as a FILE WINDOW - no taskbar (Shell_TrayWnd), no desktop (Progman), and
+                // ms-settings: activation blocks for lack of shell infrastructure. Route the
+                // restart through the same helper winpart/EnsureBackgroundExplorerShellAsync use:
+                // it sets Shell=explorer.exe, starts a fresh explorer that therefore assumes the
+                // shell role, waits for the taskbar, then restores Shell to the GCM loader in its
+                // finally so the NEXT boot still lands in GCM. Killing explorer first makes the
+                // helper's "start only if not running" guard fall through and launch a new one.
+                Console.WriteLine("Restoring Explorer as the desktop shell...");
 
                 // Kill all running instances of explorer
                 KillProcess("explorer.exe");
@@ -7442,8 +7450,15 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                 // Give Windows a brief moment to clear file locks and handles
                 await Task.Delay(500);
 
-                // Start a fresh explorer.exe instance
-                Process.Start("explorer.exe");
+                // Start a fresh explorer.exe AS THE SHELL, restoring HKLM Shell to the GCM
+                // loader afterwards (handled inside the helper's finally).
+                string desktopShellTarget = GcmWindowsShellService.ResolveStableExecutablePath(
+                    Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty);
+                bool desktopShellReady = await GcmWindowsShellService.StartWindowsShellForCurrentSessionAsync(
+                    desktopShellTarget, arguments: null);
+                App.StartupTrace(desktopShellReady
+                    ? "BackToWindows: desktop shell restored (Shell_TrayWnd present)."
+                    : "BackToWindows: desktop shell restore timed out; explorer may be a file window.");
             }
             catch (Exception ex)
             {
