@@ -1148,7 +1148,7 @@ namespace gcmloader
             EnsureBooleanSetting("usepreaudio", false);
             EnsureBooleanSetting("gcmwallpaper", false);
             EnsureBooleanSetting("show_discord", true);
-            EnsureBooleanSetting("uac", true);
+            EnsureBooleanSetting("uac", false);   // RDH: console never prompts
 
             EnsureStringSetting("steamlauncherpath", string.Empty);
             EnsureStringSetting("startupvideo_path", string.Empty);
@@ -1166,6 +1166,11 @@ namespace gcmloader
             EnsureStringSetting("theme_top_dock_position", DefaultThemeTopDockPosition);
             MigrateThemeDefaultsIfNeeded();
             EnsureSteamIntegrationDefaults();
+
+            // RDH patch: create rdh_cards.json alongside the other generated
+            // defaults. In Playnite mode the apps column renders these fixed
+            // cards instead of live processes, so the file must exist.
+            RdhEnsureCardsFile();
 
             EnsureDefaultShortcuts();
         }

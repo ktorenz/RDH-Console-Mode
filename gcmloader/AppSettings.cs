@@ -110,7 +110,10 @@ namespace gcmloader
                 {
                     var defaultSettings = new TomlTable
                     {
-                        ["launcher"] = "steam",
+                        // RDH: this product ships Playnite as the launcher and must
+                        // never generate a settings file that prompts for UAC.
+                        ["launcher"] = "playnite",
+                        ["uac"] = false,
                         ["steamlauncherpath"] = @"C:\Program Files (x86)\Steam\steam.exe",
                         ["onboarding"] = false
                     };

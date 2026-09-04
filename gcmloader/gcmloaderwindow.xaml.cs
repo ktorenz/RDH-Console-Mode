@@ -7467,21 +7467,16 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
             CleanupLogging();
             preaudio(false, true);
 
-            // Restore UAC settings
-            try
-            {
-                if (AppSettings.Load<bool>("uac"))
-                {
-                    if (!await TrySetUacModeViaServiceAsync(true))
-                    {
-                        uac("on");
-                    }
-                }
-            }
-            catch
-            {
-                uac("on");
-            }
+            // RDH patch: never restore Windows UAC prompting on exit.
+            // Stock GCM called uac("on") here, writing ConsentPromptBehaviorAdmin = 5
+            // and PromptOnSecureDesktop = 1. On the next launch the unelevated
+            // bootstrap relaunches itself via ShellExecute "runas", so the customer
+            // got a Yes/No consent dialog every time GCM started. A sealed console is
+            // never administered by its user: it stays at ConsentPromptBehaviorAdmin = 0
+            // as set by RDH-Console-Tweaks.reg and re-asserted by uac("off") at startup.
+            // Removed unconditionally rather than gated on the "uac" setting, because
+            // the stock catch block also called uac("on") - so a missing or unparseable
+            // key restored prompting anyway.
 
             // Exit safely
             Environment.Exit(0);
@@ -9691,6 +9686,47 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
             {
                 App.StartupTrace($"RDH fixed cards json failed: {ex.Message}");
                 return new List<RdhFixedCard>();
+            }
+        }
+
+        // RDH patch: generate %APPDATA%\gcmsettings\rdh_cards.json on first run.
+        // In Playnite mode the apps column shows these fixed cards INSTEAD of live
+        // process cards (see UpdateUiFromData), so without this file that column is
+        // simply empty and the format is undiscoverable. Only candidates whose exe
+        // actually exists are written, because RdhBuildFixedCard skips a missing exe
+        // silently - a generated file full of dead paths would look like a bug.
+        // Never overwrites an existing file.
+        private static void RdhEnsureCardsFile()
+        {
+            try
+            {
+                string dir = RdhSettingsDir;
+                string path = Path.Combine(dir, "rdh_cards.json");
+                if (File.Exists(path)) return;
+                Directory.CreateDirectory(dir);
+
+                string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string sysRoot = Path.GetPathRoot(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows)) ?? @"C:\";
+
+                var candidates = new List<RdhFixedCard>
+                {
+                    new RdhFixedCard { name = "Firefox", subtitle = "Browser",
+                        exe = Path.Combine(pf, @"Mozilla Firefox\firefox.exe"),
+                        args = "", image = "firefox.png", column = "apps" },
+                    new RdhFixedCard { name = "Playnite", subtitle = "Library",
+                        exe = Path.Combine(sysRoot, @"Playnite\Playnite.DesktopApp.exe"),
+                        args = "", image = "playnite.png", column = "apps" },
+                };
+
+                var present = candidates.Where(c => File.Exists(c.exe)).ToList();
+                File.WriteAllText(path, Newtonsoft.Json.JsonConvert.SerializeObject(
+                    present, Newtonsoft.Json.Formatting.Indented));
+                App.StartupTrace($"RDH cards file generated at '{path}' with {present.Count} entries.");
+            }
+            catch (Exception ex)
+            {
+                App.StartupTrace($"RDH cards file generation failed: {ex.Message}");
             }
         }
 
