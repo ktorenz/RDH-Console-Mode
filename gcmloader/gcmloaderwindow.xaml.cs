@@ -5788,17 +5788,15 @@ private static readonly string SettingsFilePath = Path.Combine(SettingsFolder, "
                     Debug.WriteLine("Starting persistent taskbar hiding loop...");
                     while (!_taskbarHiderCts.Token.IsCancellationRequested)
                     {
-                        // RDH patch: yield while Start menu / Search / Explorer
-                        // holds the foreground so the desktop stays reachable;
-                        // resume hiding as soon as Playnite or GCM is back.
-                        if (RdhShouldPauseTaskbarHiding())
-                        {
-                            TaskbarVisibility.ShowTaskbar();
-                        }
-                        else
-                        {
-                            TaskbarVisibility.HideTaskbar();
-                        }
+                        // Use your robust hide method
+                        // (26.9.4.7) Unconditional again, exactly as upstream 2.6.8. fb177fe's
+                        // yield showed the taskbar while Start/Search/Explorer held the
+                        // foreground, and with the taskbar visible the Start menu can open.
+                        // GCM's contract is the opposite: taskbar - and therefore Start -
+                        // stay suppressed the whole time GCM runs. The desktop is reached via
+                        // the top-dock Windows button (BackToWindows), not by letting the
+                        // Win key win a 20x/second race. Reverted.
+                        TaskbarVisibility.HideTaskbar();
                         try
                         {
                             // Check and hide 4 times per second.x
@@ -9716,30 +9714,16 @@ m64JWtHYqyODmcqqQSjL4Fr+V/zTcH2CDVsz52GX9OAtAgMBAAE=
             [DllImport("user32.dll", SetLastError = true)] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
         }
 
-        // True while the user is on the desktop side of the machine: Start menu,
-        // Search, or any Explorer surface (file window, desktop) holds the
-        // foreground. The taskbar-hiding loop yields during that time; without
-        // this, a Win-key press loses a 20x/second race against HideTaskbar and
-        // the desktop is effectively unreachable.
-        private static bool RdhShouldPauseTaskbarHiding()
-        {
-            if (!RdhDirectPlayniteMode()) return false;
-            try
-            {
-                IntPtr fg = RdhFg.GetForegroundWindow();
-                if (fg == IntPtr.Zero) return false;
-                RdhFg.GetWindowThreadProcessId(fg, out uint pid);
-                if (pid == 0) return false;
-                using var proc = Process.GetProcessById((int)pid);
-                string n = proc.ProcessName;
-                return n.Equals("StartMenuExperienceHost", StringComparison.OrdinalIgnoreCase)
-                    || n.Equals("SearchHost", StringComparison.OrdinalIgnoreCase)
-                    || n.Equals("SearchApp", StringComparison.OrdinalIgnoreCase)
-                    || n.Equals("ShellExperienceHost", StringComparison.OrdinalIgnoreCase)
-                    || n.Equals("explorer", StringComparison.OrdinalIgnoreCase);
-            }
-            catch { return false; }
-        }
+        // (26.9.4.7) RdhShouldPauseTaskbarHiding was REMOVED. (RdhFg above stays:
+        // MainWindow.RdhControllerPrompt.cs uses its window-style helpers.)
+        // The predicate came from fb177fe (2026-08-30), which made the hider loop SHOW the
+        // taskbar while Start, Search or Explorer held the foreground so the desktop
+        // was reachable from the Win key. That inverted GCM's contract: the taskbar
+        // must stay hidden the whole time GCM runs, and with Shell_TrayWnd hidden the
+        // Start menu cannot come up - which is precisely how upstream 2.6.8 (and
+        // 2.4.3) suppress it, with no keyboard hook at all. The yield existed only
+        // because there was once no other way back to the desktop; the top-dock
+        // Windows button (BackToWindows, 26.9.4.3+) is that way now.
 
         private static string RdhSettingsDir => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "gcmsettings");
